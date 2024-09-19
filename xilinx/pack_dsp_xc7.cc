@@ -23,6 +23,19 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
+static bool is_cascade_input(const PortInfo& port, const Context *ctx)
+{
+    if(port.name == id_CARRYCASCIN || port.name == id_MULTSIGNIN) return true;
+		const std::string& str = port.name.c_str(ctx);
+    return boost::starts_with(str, "ACIN") || boost::starts_with(str, "BCIN") || boost::starts_with(str, "PCIN");
+}
+static bool is_cascade_output(const PortInfo& port, const Context *ctx)
+{
+    if(port.name == id_CARRYCASCOUT || port.name == id_MULTSIGNOUT) return true;
+		const std::string& str = port.name.c_str(ctx);
+    return boost::starts_with(str, "ACOUT") || boost::starts_with(str, "BCOUT") || boost::starts_with(str, "PCOUT");
+}
+
 void XC7Packer::walk_dsp(CellInfo *root, CellInfo *current_cell, int constr_z)
 {
     CellInfo *cascaded_cell = nullptr;
@@ -31,7 +44,7 @@ void XC7Packer::walk_dsp(CellInfo *root, CellInfo *current_cell, int constr_z)
         if (ni->users.entries() > 1)
             log_error("Port %s connected to net %s has more than one user", port.c_str(), ni->name.c_str(ctx));
 
-        PortRef& user = *ni->users.end();
+        PortRef& user = *ni->users.begin();
         if (user.cell->type != id_DSP48E1_DSP48E1)
             log_error("User %s of net %s is not a DSP block, but %s",
                 user.cell->name.c_str(ctx), ni->name.c_str(ctx), user.cell->type.c_str(ctx));
@@ -39,13 +52,13 @@ void XC7Packer::walk_dsp(CellInfo *root, CellInfo *current_cell, int constr_z)
 
     // see if any cascade outputs are connected
     for (auto port : current_cell->ports) {
-        if (!boost::contains(port.first.str(ctx), "COUT")) continue;
+        if (!is_cascade_output(port.second, ctx)) continue;
         NetInfo *cout_net = port.second.net;
 
-        if (cout_net == nullptr) continue;
+        if (cout_net == nullptr || cout_net->users.empty()) continue;
 
         check_illegal_fanout(cout_net, port.first.c_str(ctx));
-        PortRef& user = *cout_net->users.end();
+        PortRef& user = *cout_net->users.begin();
         CellInfo *cout_cell = user.cell;
         NPNR_ASSERT(cout_cell != nullptr);
 
@@ -65,6 +78,8 @@ void XC7Packer::walk_dsp(CellInfo *root, CellInfo *current_cell, int constr_z)
         // the connected cell has to be above the current cell,
         // otherwise it cannot be routed, because the cascading ports
         // are only connected to the DSP above
+        // FIXME The offset +/-5 applies to DSP tiles, not to DSP slices
+        //   So two cascaded DSPs can be placed in one tile, which does not correspond to a +/-5 offset
         auto previous_y = (current_cell == root) ? 0 : current_cell->constr_y;
         cascaded_cell->constr_y = previous_y + (is_lower_bel ? -5 : 0);
         cascaded_cell->constr_z = constr_z;
@@ -105,7 +120,8 @@ void XC7Packer::pack_dsps()
             for (auto &port : ci->ports) {
                 std::string n = port.first.str(ctx);
 
-                if (boost::starts_with(n, "ACIN") || boost::starts_with(n, "BCIN") || boost::starts_with(n, "PCIN")) {
+                // Cascading inputs do not use routing resources, so disconnect them if constants
+                if (is_cascade_input(port.second, ctx)) {
                     if (port.second.net == nullptr)
                         continue;
                     if (port.second.net->name == ctx->id("$PACKER_GND_NET"))
@@ -140,7 +156,7 @@ void XC7Packer::pack_dsps()
     for (auto ci : all_dsps) {
         bool cascade_input_used = false;
         for (auto port : ci->ports) {
-            if (!boost::contains(port.first.str(ctx), "CIN")) continue;
+            if (!is_cascade_input(port.second, ctx)) continue;
             if (port.second.net != nullptr) {
                 cascade_input_used = true;
                 break;
@@ -152,11 +168,15 @@ void XC7Packer::pack_dsps()
         }
     }
 
+    // Creating placement clusters is currently disabled, because the current constraints
+    // on Y coordinates don't always correspond to placement possibilities, which makes placer crash
+    #if 0
     for (auto root : dsp_roots) {
         root->constr_abs_z = true;
         root->constr_z = BEL_LOWER_DSP;
         walk_dsp(root, root, BEL_UPPER_DSP);
     }
+    #endif
 }
 
 NEXTPNR_NAMESPACE_END
