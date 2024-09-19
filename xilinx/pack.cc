@@ -744,31 +744,37 @@ void XC7Packer::pack_bram()
             xform_cell(sdp_bram_rules, ci);
     }
 
-    // Rewrite byte enables according to data width
+    std::vector<CellInfo *> all_brams;
+
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
         if (ci->type.in(id_RAMB18E1, id_RAMB36E1)) {
-            for (char port : {'A', 'B'}) {
-                int write_width = int_or_default(ci->params, ctx->id(std::string("WRITE_WIDTH_") + port), 18);
-                int we_width;
-                if (ci->type == id_RAMB36E1)
-                    we_width = 4;
-                else
-                    we_width = (port == 'B') ? 4 : 2;
-                if (write_width >= (9 * we_width))
-                    continue;
-                int used_we_width = std::max(write_width / 9, 1);
-                for (int i = used_we_width; i < we_width; i++) {
-                    NetInfo *low_we = ci->getPort(ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") +
-                                                          std::to_string(i % used_we_width) + "]"));
-                    IdString curr_we = ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]");
-                    if (!ci->ports.count(curr_we)) {
-                        ci->ports[curr_we].type = PORT_IN;
-                        ci->ports[curr_we].name = curr_we;
-                    }
-                    ci->disconnectPort(curr_we);
-                    ci->connectPort(curr_we, low_we);
+            all_brams.push_back(ci);
+        }
+    }
+
+    // Rewrite byte enables according to data width
+    for (CellInfo *ci : all_brams) {
+        for (char port : {'A', 'B'}) {
+            int write_width = int_or_default(ci->params, ctx->id(std::string("WRITE_WIDTH_") + port), 18);
+            int we_width;
+            if (ci->type == id_RAMB36E1)
+                we_width = 4;
+            else
+                we_width = (port == 'B') ? 4 : 2;
+            if (write_width >= (9 * we_width))
+                continue;
+            int used_we_width = std::max(write_width / 9, 1);
+            for (int i = used_we_width; i < we_width; i++) {
+                NetInfo *low_we = ci->getPort(ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") +
+                                                      std::to_string(i % used_we_width) + "]"));
+                IdString curr_we = ctx->id(std::string(port == 'B' ? "WEBWE[" : "WEA[") + std::to_string(i) + "]");
+                if (!ci->ports.count(curr_we)) {
+                    ci->ports[curr_we].type = PORT_IN;
+                    ci->ports[curr_we].name = curr_we;
                 }
+                ci->disconnectPort(curr_we);
+                ci->connectPort(curr_we, low_we);
             }
         }
     }
@@ -776,8 +782,7 @@ void XC7Packer::pack_bram()
     generic_xform(bram_rules, false);
 
     // These pins have no logical mapping, so must be tied after transformation
-    for (auto &cell : ctx->cells) {
-        CellInfo *ci = cell.second.get();
+    for (CellInfo *ci : all_brams) {
         if (ci->type == id_RAMB18E1_RAMB18E1) {
             int wwa = int_or_default(ci->params, id_WRITE_WIDTH_A, 0);
             for (int i = ((wwa == 0) ? 0 : 2); i < 4; i++) {
@@ -855,6 +860,20 @@ void XC7Packer::pack_bram()
                         }
                     }
                 }
+            }
+        }
+    }
+
+
+    // Cascading pins have no routing associated, clean these connections
+    for (CellInfo *ci : all_brams) {
+        for (auto &port : ci->ports) {
+            // Disconnect constant cascaded inputs
+            if (port.first == id_CASCADEINA || port.first == id_CASCADEINB) {
+                if (port.second.net == nullptr)
+                    continue;
+                if (port.second.net->name == ctx->id("$PACKER_GND_NET"))
+                    ci->disconnectPort(port.first);
             }
         }
     }
