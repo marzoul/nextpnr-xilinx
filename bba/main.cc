@@ -19,7 +19,7 @@
  */
 
 #include <assert.h>
-#include <boost/filesystem/convenience.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <map>
